@@ -11,6 +11,11 @@ resource "aws_s3_bucket" "dest" {
   force_destroy = true
 }
 
+resource "aws_s3_bucket" "reporting" {
+  bucket        = local.reporting_bucket_name
+  force_destroy = true
+}
+
 # ---------------------------------------------------------------------------
 # Hardening
 # ---------------------------------------------------------------------------
@@ -53,20 +58,49 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Also add a bucket policy to each that denies non-TLS requests 
-# (aws:SecureTransport = false). 
-# Keep the DataSync role least-privileged: read/list access on the 
-# source, write access on the destination, and only the KMS permissions
-# it needs if you choose SSE-KMS instead of SSE-S3. Versioning helps 
-# recover from overwrites or deletes; add a noncurrent-version 
-# lifecycle rule if storage costs need limits.
-# 1. Define the bucket
-# 2. Build the combined policy document
+# Versioning keeps old copies on every overwrite/delete; expire them so
+# storage costs stay bounded.
+resource "aws_s3_bucket_lifecycle_configuration" "this" {
+  for_each = local.bucket_ids
+  bucket   = each.value
+
+  rule {
+    id     = "expire-noncurrent-and-abort-mpu"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 7
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  dynamic "rule" {
+    for_each = each.key == "reporting" ? [1] : []
+
+    content {
+      id     = "expire-reports-after-30-days"
+      status = "Enabled"
+
+      filter {
+        prefix = "reports/"
+      }
+
+      expiration {
+        days = 30
+      }
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.this]
+}
+
 # Deny any non-TLS request. One policy per bucket: a bucket policy can only
 # reference its own bucket's ARN, so each document is built from its own ARN.
-# Adding a bucket policy to each that denies non-TLS requests 
-# (aws:SecureTransport = false). 
 data "aws_iam_policy_document" "deny_non_tls" {
   for_each = local.bucket_arns
 
@@ -94,16 +128,6 @@ data "aws_iam_policy_document" "deny_non_tls" {
   }
 }
 
-# 3. Attach the document to the bucket
-# resource "aws_s3_bucket_policy" "source" {
-#   bucket = aws_s3_bucket.source.id
-#   policy = data.aws_iam_policy_document.deny_non_tls.json
-# }
-
-# resource "aws_s3_bucket_policy" "dest" {
-#   bucket = aws_s3_bucket.dest.id
-#   policy = data.aws_iam_policy_document.deny_non_tls.json
-# }
 resource "aws_s3_bucket_policy" "this" {
   for_each = local.bucket_ids
   bucket   = each.value
@@ -111,4 +135,20 @@ resource "aws_s3_bucket_policy" "this" {
 
   # Avoids a race with the public access block (S3 returns a 409 otherwise)
   depends_on = [aws_s3_bucket_public_access_block.this]
+}
+
+# ---------------------------------------------------------------------------
+# Added Data: everything under ./sample-data is uploaded to the source bucket.
+# Add, edit or delete files locally, `terraform apply`, then re-run the task.
+# ---------------------------------------------------------------------------
+resource "aws_s3_object" "sample_data" {
+  for_each = fileset("${path.module}/sample-data", "**")
+
+  bucket = aws_s3_bucket.source.id
+  key    = each.value
+
+  source      = "${path.module}/sample-data/${each.value}"
+  source_hash = filemd5("${path.module}/sample-data/${each.value}")
+
+  depends_on = [aws_s3_bucket_versioning.this, aws_s3_bucket_policy.this]
 }

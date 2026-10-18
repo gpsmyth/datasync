@@ -12,12 +12,12 @@ data "aws_iam_policy_document" "datasync_assume" {
       identifiers = ["datasync.amazonaws.com"]
     }
 
-    # Confused-deputy protection: resticts to your AWS account. 
+    # Confused-deputy protection: restricts to your AWS account. 
     # See https://docs.aws.amazon.com/IAM/latest/UserGuide/confused-deputy.html
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
+      values   = [local.account_id]
     }
   }
 }
@@ -101,4 +101,31 @@ resource "aws_iam_role_policy" "dest" {
   name   = "s3-read-write"
   role   = aws_iam_role.dest.id
   policy = data.aws_iam_policy_document.dest_access.json
+}
+
+resource "aws_iam_role" "reporting" {
+  name               = "datasync-s3-reporting"
+  assume_role_policy = data.aws_iam_policy_document.datasync_assume.json
+}
+
+data "aws_iam_policy_document" "reporting_access" {
+  statement {
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.reporting.arn}/reports/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "reporting" {
+  name   = "s3-reports-write"
+  role   = aws_iam_role.reporting.id
+  policy = data.aws_iam_policy_document.reporting_access.json
+}
+
+# Wait 30 seconds for IAM propagation before creating the DataSync task.
+resource "time_sleep" "iam_propagation" {
+  create_duration = "30s"
+  depends_on = [
+    aws_iam_role_policy.source,
+    aws_iam_role_policy.dest,
+  ]
 }
