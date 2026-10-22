@@ -48,7 +48,7 @@ resource "aws_datasync_task" "s3_to_s3" {
     overwrite_mode         = "ALWAYS" # Default is ALWAYS, but could be NEVER
     transfer_mode          = "CHANGED"
     log_level              = "TRANSFER" # provider default is OFF, which writes no logs
-    preserve_deleted_files = "PRESERVE" # Default is PRESERVE, but could be REMOVE
+    preserve_deleted_files = "REMOVE" # Default is PRESERVE, but could be REMOVE
     # "REMOVE" mirrors deletes to the destination
 
     # POSIX metadata does not apply to S3 locations. The console sets these

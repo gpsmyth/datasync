@@ -238,3 +238,442 @@ should show per-file transfer entries.
 2026-10-15 13:48:49       1540 reports/Summary-Reports/task-00d85e7072195ae0c/exec-07f7b8aa02fced81e/exec-07f7b8aa02fced81e.summary-v1.json
 ```
 and allow a few minutes after `SUCCESS` before concluding they’re missing.
+
+## Further test runs
+
+### Simulate 20 files to transfer
+
+```zsh
+for i in $(seq -w 1 20); do echo "note $i" > sample-data/docs/note-$i.txt; done
+```
+- Perform `terraform apply` and enter `yes` if you've noted 20 file changes occurring
+- Perform `$(terraform output -raw start_task_command)` to produce a task execution arn. 
+- Progress with examaning status as followss:
+```zsh
+aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Files:FilesTransferred,Bytes:BytesTransferred,Result:Result}'
+{
+    "Status": "SUCCESS",
+    "Files": 20,
+    "Bytes": 160,
+    "Result": {
+        "PrepareDuration": 1568,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 6719,
+        "TransferDuration": 4549,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 521,
+        "VerifyStatus": "SUCCESS"
+    }
+}
+```
+
+or run the full command of 
+```zsh
+ aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN"
+```
+
+The following parameter are noted:
+- "FilesTransferred": 20,
+- "BytesTransferred": 160,
+- "FilesDeleted": 0,
+- "FilesSkipped": 3,
+- "FilesVerified": 20, 
+
+### Simulate incremental behaviour
+
+- Edit two files out of the previous 20 created
+```zsh
+echo "changed $(date)" >> sample-data/docs/note-03.txt
+echo "changed $(date)" >> sample-data/docs/note-07.txt
+terraform apply
+$(terraform output -raw start_task_command)
+```
+
+As you can see, two files were transferred
+```zsh
+❯ aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Files:FilesTransferred,Bytes:BytesTransferred,Result:Result}'
+{
+    "Status": "SUCCESS",
+    "Files": 2,
+    "Bytes": 92,
+    "Result": {
+        "PrepareDuration": 1539,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 3888,
+        "TransferDuration": 2070,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 234,
+        "VerifyStatus": "SUCCESS"
+    }
+}
+```
+- EXEC_ARN variable was captured prior
+
+### Perform Deletions
+
+1. `rm sample-data/docs/note-1*.txt` (deletes 10 files) and `terraform apply`. The source bucket gets delete markers, since it’s versioned.
+1. Run the task with `PRESERVE`. Nothing is removed from the destination.
+1. Switch to `REMOVE`, `terraform apply`, and run again. The files disappear from the destination listing, but `aws s3api list-object-versions` on the dest bucket still shows the old versions, with delete markers on top. The 7-day lifecycle rule is what eventually removes them.
+
+Keep in mind that `REMOVE` makes the destination a strict mirror, so it would delete anything in the destination that isn’t in the source. That’s fine for this lab but dangerous on a destination that holds other data.
+
+In the deletion mode with task in `PRESERVE` mode the following output is noted:
+```zsh
+ aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Files:FilesTransferred,Bytes:BytesTransferred,Result:Result}'
+{
+    "Status": "SUCCESS",
+    "Files": 0,
+    "Bytes": 0,
+    "Result": {
+        "PrepareDuration": 1351,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 1655,
+        "TransferDuration": 233,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 5,
+        "VerifyStatus": "SUCCESS"
+    }
+}
+
+aws s3 ls s3://$(terraform output -raw dest_bucket)/ --recursive | wc -l
+      23
+aws s3 ls s3://$(terraform output -raw source_bucket)/ --recursive | wc -l
+      14
+```
+so no files were transferred
+
+In the deletion mode with task in `REMOVE` the following output is noted:
+```zsh
+aws s3 ls s3://$(terraform output -raw dest_bucket)/docs/ | wc -l
+      12
+aws s3 ls s3://$(terraform output -raw source_bucket)/docs/ | wc -l
+      12
+
+aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Files:FilesTransferred,Bytes:BytesTransferred,Result:Result}'
+{
+    "Status": "SUCCESS",
+    "Files": 0,
+    "Bytes": 0,
+    "Result": {
+        "PrepareDuration": 1312,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 1766,
+        "TransferDuration": 339,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 38,
+        "VerifyStatus": "SUCCESS"
+    }
+}
+
+and
+FilesVerified is 0
+
+or
+❯ aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Transferred:FilesTransferred,Deleted:FilesDeleted,Skipped:FilesSkipped,Verified:FilesVerified,Result:Result}'
+{
+    "Status": "SUCCESS",
+    "Transferred": 0,
+    "Deleted": 10,
+    "Skipped": 13,
+    "Verified": 0,
+    "Result": {
+        "PrepareDuration": 1312,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 1766,
+        "TransferDuration": 339,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 38,
+        "VerifyStatus": "SUCCESS"
+    }
+}
+```
+
+### File mode testings
+
+desribe-task-execution query for datasync is (having obtained `EXEC_ARN` variable)
+
+```zsh
+aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Transferred:FilesTransferred,Deleted:FilesDeleted,Skipped:FilesSkipped,Verified:FilesVerified,Result:Result}'
+```
+
+#### The verify_mode test
+
+Explanation of the various mode for `verify_mode`:
+- **POINT_IN_TIME_CONSISTENT**  Default for basic mode. At the end of the transfer task, DataSync scans the entire source and entire destination locations to verify that they are 100% fully synchronized.
+  - **Not supported when using `ENHANCED` mode**
+- **ONLY_FILES_TRANSFERRED** Recommended for Enhanced Mode
+  - calculates the checksum at the source before/during transit, and then compares it to the checksum at the destination once the transfer completes. It skips re-verifying untouched files already residing at both locations.
+- **None** does not perform any extra verification scans at the end of the task execution.
+
+I ran the task three times back to back with no source changes, using a different mode each time. I captured each execution ARN, wait for it to finish, then run the query above
+
+```zsh
+# 1. Baseline: only files transferred (nothing changed, so little or nothing to verify)
+EXEC_ARN=$($(terraform output -raw start_task_command) \
+  --override-options VerifyMode=ONLY_FILES_TRANSFERRED \
+  --query TaskExecutionArn --output text)
+
+# 2. Full scan of the destination
+EXEC_ARN=$($(terraform output -raw start_task_command) \
+  --override-options VerifyMode=POINT_IN_TIME_CONSISTENT \
+  --query TaskExecutionArn --output text)
+
+# 3. No verification at all
+EXEC_ARN=$($(terraform output -raw start_task_command) \
+  --override-options VerifyMode=NONE \
+  --query TaskExecutionArn --output text)
+```
+
+Verify status on each run via the pooling loop
+
+```zsh
+while true; do
+  S=$(aws datasync describe-task-execution --region ap-southeast-2 \
+        --task-execution-arn "$EXEC_ARN" --query Status --output text)
+  echo "$(date +%T) $S"
+  [[ "$S" == "SUCCESS" || "$S" == "ERROR" ]] && break
+  sleep 10
+done
+```
+
+Here I have a clean three-way comparison, all with no source changes and the same 13 skipped files from the previous deletion experiment:
+
+| Mode | Verified | VerifyStatus | VerifyDuration (ms) | TotalDuration (ms) |
+| --- | ---: | --- | ---: | ---: |
+| NONE | 0 | PENDING | 0 | 1665 |
+| ONLY_FILES_TRANSFERRED | 0 | SUCCESS | 4 | 1660 |
+| POINT_IN_TIME_CONSISTENT | 13 | SUCCESS | 1082 | 2762 |
+
+**What the table shows**
+- `NONE` vs `ONLY_FILES_TRANSFERRED`. Both verify nothing here, but the status differs. With `NONE` the verify phase never starts, so it stays `PENDING`. With `ONLY_FILES_TRANSFERRED` the phase does run, finds nothing that was transferred, and finishes almost instantly (4 ms) with `SUCCESS`. The same 0 verified count means different things in the two cases: “skipped by design” versus “ran and had nothing to check”.
+- `ONLY_FILES_TRANSFERRED` vs `POINT_IN_TIME_CONSISTENT`. The extra second of verification is the full scan of the destination, and it took the total from about 1.7 s to 2.8 s. Only the full-scan mode would catch a file that drifted or went missing at the destination outside DataSync’s own work.
+- **Everything else is identical** across the runs (13 skipped, about 1.3 s of preparation, about 270 ms of transfer), which confirms that `verify_mode` only affects the verification phase.
+
+**What PENDING means here**
+
+DataSync reports the phase statuses as `PENDING`, `SUCCESS` or `ERROR`, and `PENDING` is the state a phase sits in when it never ran. My other numbers back that up: `VerifyDuration` is 0 and `Verified` is 0. With `NONE`, the verify phase was skipped entirely, so it never moved past its starting state. It isn’t a stuck or pending job, and the execution as a whole finished with `SUCCESS`.
+
+#### Performing Drift repair
+
+Let's simulate something tampering with an object on the destination bucket
+
+```zsh
+echo "tampered" > /tmp/tamper.txt
+aws s3 cp /tmp/tamper.txt s3://$(terraform output -raw dest_bucket)/docs/note-01.txt
+```
+
+The `options` in `datsync.tf` are
+```hcl
+options {
+    verify_mode            = "ONLY_FILES_TRANSFERRED"
+    overwrite_mode         = "ALWAYS" # Default is ALWAYS, but could be NEVER
+    transfer_mode          = "CHANGED"
+    log_level              = "TRANSFER" # provider default is OFF, which writes no logs
+    preserve_deleted_files = "REMOVE" # Default is PRESERVE, but could be REMOVE
+    # "REMOVE" mirrors deletes to the destination
+```
+
+Then
+```zsh
+❯ EXEC_ARN=$($(terraform output -raw start_task_command) \
+  --override-options VerifyMode=ONLY_FILES_TRANSFERRED \
+  --query TaskExecutionArn --output text)
+
+❯ aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Transferred:FilesTransferred,Deleted:FilesDeleted,Skipped:FilesSkipped,Verified:FilesVerified,Result:Result}'
+{
+    "Status": "SUCCESS",
+    "Transferred": 1,
+    "Deleted": 0,
+    "Skipped": 12,
+    "Verified": 1,
+    "Result": {
+        "PrepareDuration": 1350,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 1811,
+        "TransferDuration": 374,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 23,
+        "VerifyStatus": "SUCCESS"
+    }
+}
+```
+
+**What happened**
+- `Transferred: 1`, `Skipped: 12`. The tampered `note-01.txt` no longer matched the source, so the `CHANGED` comparison treated it as changed and copied it again. `overwrite_mode = ALWAYS` allowed the overwrite. My tampered file was a different size and had a newer timestamp, so either would trigger it (see below observation)
+- `Verified: 1`. `ONLY_FILES_TRANSFERRED` verified the one file it had just copied, which is what the mode is meant to do
+
+```zsh
+❯ aws s3api list-object-versions --no-cli-pager \
+  --bucket $(terraform output -raw dest_bucket) \
+  --prefix docs/note-01.txt \
+  --query 'Versions[].{VersionId:VersionId,IsLatest:IsLatest,Modified:LastModified,Size:Size}' \
+  --output table
+---------------------------------------------------------------------------------------
+|                                 ListObjectVersions                                  |
++----------+-----------------------------+-------+------------------------------------+
+| IsLatest |          Modified           | Size  |             VersionId              |
++----------+-----------------------------+-------+------------------------------------+
+|  True    |  2026-10-20T06:52:11+00:00  |  8    |  CLed5OXEJHv_pQ02NWwkqEC8xIxF1DgC  |
+|  False   |  2026-10-20T06:49:04+00:00  |  9    |  31YW30G18dMoc1vC3jZpT1UOgdFDVJ2k  |
+|  False   |  2026-10-18T23:19:14+00:00  |  8    |  sZN1yU.apzIMHzRquUHk77pznjrjoWzw  |
++----------+-----------------------------+-------+------------------------------------+
+```
+This table confirms the drift-repair explanation
+
+- To confirm the middle version really holds the tampered content, you can read it by version ID:
+```zsh
+❯ aws s3api get-object --no-cli-pager \
+  --bucket $(terraform output -raw dest_bucket) \
+  --key docs/note-01.txt \
+  --version-id 31YW30G18dMoc1vC3jZpT1UOgdFDVJ2k \
+  /tmp/old-version.txt && cat /tmp/old-version.txt
+{
+    "AcceptRanges": "bytes",
+    "LastModified": "2026-10-20T06:49:04+00:00",
+    "ContentLength": 9,
+    "ETag": "\"513464b728fd8dec2039cff5710be0ca\"",
+    "ChecksumCRC64NVME": "8zL8EIzKqM4=",
+    "ChecksumType": "FULL_OBJECT",
+    "VersionId": "31YW30G18dMoc1vC3jZpT1UOgdFDVJ2k",
+    "ContentType": "text/plain",
+    "ServerSideEncryption": "AES256",
+    "Metadata": {}
+}
+tampered
+```
+- If you want to keep the `tampered` file as latest file you need to `override` the `OverWriteMode` as follows:
+```zsh
+aws s3 cp /tmp/tamper.txt s3://$(terraform output -raw dest_bucket)/docs/note-01.txt
+
+EXEC_ARN=$($(terraform output -raw start_task_command) \
+  --override-options OverwriteMode=NEVER,VerifyMode=ONLY_FILES_TRANSFERRED \
+  --query TaskExecutionArn --output text)
+```
+
+Check with command
+```zsh
+aws s3 cp s3://$(terraform output -raw dest_bucket)/docs/note-01.txt -
+```
+"-" represents standard output in this conext
+
+#### Introducing an error and debugging
+
+While pooling the command above with `OverwriteMode=NEVER", the polling produced the following output:
+```zsh
+❯ while true; do
+  S=$(aws datasync describe-task-execution --region ap-southeast-2 \
+        --task-execution-arn "$EXEC_ARN" --query Status --output text)
+  echo "$(date +%T) $S"
+  [[ "$S" == "SUCCESS" || "$S" == "ERROR" ]] && break
+  sleep 10
+done
+20:39:19 LAUNCHING
+20:39:30 LAUNCHING
+20:39:40 LAUNCHING
+20:39:51 LAUNCHING
+20:40:01 LAUNCHING
+20:40:11 LAUNCHING
+20:40:22 LAUNCHING
+20:40:33 LAUNCHING
+20:40:43 LAUNCHING
+20:40:53 ERROR
+
+❯ aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Transferred:FilesTransferred,Skipped:FilesSkipped,Verified:FilesVerified,VerifyFailed:FilesFailed,Result:Result}'
+{
+    "Status": "ERROR",
+    "Transferred": 0,
+    "Skipped": 13,
+    "Verified": 13,
+    "VerifyFailed": null,
+    "Result": {
+        "PrepareDuration": 1363,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 2774,
+        "TransferDuration": 253,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 1100,
+        "VerifyStatus": "ERROR",
+        "ErrorCode": "CompleteWithErrorLogsWithVerificationErrorTaskReports",
+        "ErrorDetail": "Transfer and verification completed. Verification detected mismatches. See a list of files with mismatches in task reports and CloudWatch logs. If no files are listed, contact AWS Support."
+    }
+}
+```
+**What it shows**
+
+Same state, same overrides apart from VerifyMode, opposite outcomes:
+
+| Run | Overwrite | Verify mode | Verified | Status |
+| --- | --- | --- | ---: | --- |
+| Previous | NEVER | ONLY_FILES_TRANSFERRED | 0 | SUCCESS |
+| This one | NEVER | POINT_IN_TIME_CONSISTENT | 13 | ERROR |
+
+The destination held tampered content in both runs. The lightweight mode reported success because it only checks files it just transferred, and nothing was transferred. The full-scan mode compared all 13 files and flagged the mismatch.
+
+**Find the mismatch in the logs and report**
+
+```zsh
+aws logs tail /aws/datasync/s3tos3 --region ap-southeast-2 --since 30m | grep -i -E "note-01|mismatch|verif"
+
+noting
+2026-10-20T07:40:21.918000+00:00 task-00d85e7072195ae0c-exec-0d2b1c23e1f17bb93 [NOTICE] Verification failed <> /docs/note-01.txt
+```
+So summarising to correct drift
+
+```zsh
+❯ EXEC_ARN=$($(terraform output -raw start_task_command) \
+  --override-options VerifyMode=ONLY_FILES_TRANSFERRED \
+  --query TaskExecutionArn --output text)
+
+echo $EXEC_ARN
+
+# Polling for completion
+while true; do
+  S=$(aws datasync describe-task-execution --region ap-southeast-2 \
+        --task-execution-arn "$EXEC_ARN" --query Status --output text)
+  echo "$(date +%T) $S"
+  [[ "$S" == "SUCCESS" || "$S" == "ERROR" ]] && break
+  sleep 10
+done
+
+❯ aws datasync --no-cli-pager describe-task-execution --region ap-southeast-2 \
+  --task-execution-arn "$EXEC_ARN" \
+  --query '{Status:Status,Transferred:FilesTransferred,Skipped:FilesSkipped,Verified:FilesVerified,VerifyFailed:FilesFailed,Result:Result}'
+{
+    "Status": "SUCCESS",
+    "Transferred": 1,
+    "Skipped": 12,
+    "Verified": 1,
+    "VerifyFailed": null,
+    "Result": {
+        "PrepareDuration": 1583,
+        "PrepareStatus": "SUCCESS",
+        "TotalDuration": 4938,
+        "TransferDuration": 3099,
+        "TransferStatus": "SUCCESS",
+        "VerifyDuration": 272,
+        "VerifyStatus": "SUCCESS"
+    }
+}
+
+# final check
+❯ aws s3 cp s3://$(terraform output -raw dest_bucket)/docs/note-01.txt -
+note 01
+```
+

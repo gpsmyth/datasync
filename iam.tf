@@ -124,6 +124,16 @@ resource "aws_iam_role_policy" "reporting" {
 # Wait 30 seconds for IAM propagation before creating the DataSync task.
 resource "time_sleep" "iam_propagation" {
   create_duration = "30s"
+
+  # Adding a trigger for recreated role or an edited trust policy
+  # rather than a role permission edit
+  triggers = {
+    source_role = aws_iam_role.source.unique_id
+    source_trust = sha256(aws_iam_role.source.assume_role_policy)
+    dest_role   = aws_iam_role.dest.unique_id
+    dest_trust  = sha256(aws_iam_role.dest.assume_role_policy)
+  }
+  
   depends_on = [
     aws_iam_role_policy.source,
     aws_iam_role_policy.dest,
